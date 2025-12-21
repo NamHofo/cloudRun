@@ -1,36 +1,52 @@
-from flask import Flask
 from google.cloud import storage
 import json
+import tempfile
+import os
 
-app = Flask(__name__)
+BUCKET_NAME = "seminar-inferenced-data-bucket"
+OUTPUT_PATH = "merged/all_data.json"
 
-@app.route("/", methods=["GET"])
-def merge_json():
-    BUCKET_NAME = "seminar-inferenced-data-bucket"
-    OUTPUT_PATH = "merged/all_data.json"
-
+def main():
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
 
-    merged = []
+    # File tạm để stream data
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False, encoding="utf-8") as tmp:
+        tmp_path = tmp.name
+        first = True
+        tmp.write("[")
 
-    for blob in bucket.list_blobs():
-        if blob.name.endswith(".json") and not blob.name.startswith("merged/"):
+        for blob in bucket.list_blobs():
+            if not blob.name.endswith(".json"):
+                continue
+            if blob.name.startswith("merged/"):
+                continue
+
             try:
                 content = blob.download_as_text()
                 data = json.loads(content)
 
-                if isinstance(data, list):
-                    merged.extend(data)
-                else:
-                    merged.append(data)
+                records = data if isinstance(data, list) else [data]
+
+                for record in records:
+                    if not first:
+                        tmp.write(",\n")
+                    json.dump(record, tmp, ensure_ascii=False)
+                    first = False
 
             except Exception as e:
                 print(f"Skip {blob.name}: {e}")
 
-    bucket.blob(OUTPUT_PATH).upload_from_string(
-        json.dumps(merged, ensure_ascii=False, indent=2),
+        tmp.write("]")
+
+    # Upload file đã merge
+    bucket.blob(OUTPUT_PATH).upload_from_filename(
+        tmp_path,
         content_type="application/json"
     )
 
-    return f"Merged {len(merged)} records"
+    os.remove(tmp_path)
+    print("✅ MERGE DONE")
+
+if __name__ == "__main__":
+    main()
