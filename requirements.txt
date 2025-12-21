@@ -1,2 +1,3 @@
-google-cloud-storage
+flask
 gunicorn
+google-cloud-storage

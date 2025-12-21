@@ -1,7 +1,11 @@
+from flask import Flask
 from google.cloud import storage
 import json
 
-def merge_json(request):
+app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
+def merge_json():
     BUCKET_NAME = "seminar-inferenced-data-bucket"
     OUTPUT_PATH = "merged/all_data.json"
 
@@ -10,7 +14,7 @@ def merge_json(request):
 
     merged = []
 
-    for blob in bucket.list_blobs():  
+    for blob in bucket.list_blobs():
         if blob.name.endswith(".json") and not blob.name.startswith("merged/"):
             try:
                 content = blob.download_as_text()
