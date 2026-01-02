@@ -65,3 +65,8 @@ def clean_data():
         processed += 1
 
     return jsonify({"status": "success", "files_processed": processed})
+
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
