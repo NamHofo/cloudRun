@@ -1,72 +1,129 @@
-import json
-import re
-import os
 from flask import Flask, request, jsonify
 from google.cloud import storage
+import json
+import os
+import re
 
 app = Flask(__name__)
-client = storage.Client()
+storage_client = storage.Client()
 
-def clean_text(text):
-    if not text:
+# -----------------------
+# TEXT CLEANING
+# -----------------------
+def clean_text(value):
+    if value is None:
         return None
-    text = re.sub(r'\\"', '"', text)
-    text = text.replace('"', '')
-    text = re.sub(r'[\n\r\t]', ' ', text)
-    text = re.sub(r'[\x00-\x1F]', ' ', text)
-    text = re.sub(r'\s{2,}', ' ', text)
-    return text.strip() or None
+    if isinstance(value, str):
+        value = value.replace('\\"', '"')
+        value = value.replace('"', "")
+        value = re.sub(r"[\n\r\t]", " ", value)
+        value = re.sub(r"[\x00-\x1F]", " ", value)
+        value = re.sub(r"\s{2,}", " ", value)
+        return value.strip()
+    return value
 
-def normalize_content(content):
-    if isinstance(content, list):
-        return clean_text(" ".join(content))
-    if isinstance(content, dict):
-        return clean_text(content.get("string"))
-    return clean_text(content)
 
 def clean_record(record):
-    record["title"] = clean_text(record.get("title"))
-    record["sapo"] = clean_text(record.get("sapo"))
-    record["author"] = clean_text(record.get("author"))
-    record["content"] = normalize_content(record.get("content"))
+    if not isinstance(record, dict):
+        return record
+
+    for k, v in record.items():
+        if isinstance(v, str):
+            record[k] = clean_text(v)
+        elif isinstance(v, list):
+            record[k] = [
+                clean_record(i) if isinstance(i, dict) else clean_text(i)
+                for i in v
+            ]
+        elif isinstance(v, dict):
+            record[k] = clean_record(v)
     return record
 
+
+# -----------------------
+# ROOT 
+# -----------------------
+@app.route("/", methods=["POST"])
+def root():
+    return clean_data()
+
+
+# -----------------------
+# CLEAN ENDPOINT
+# -----------------------
 @app.route("/clean", methods=["POST"])
 def clean_data():
-    body = request.json
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return {"error": "Invalid JSON body"}, 400
 
-    input_bucket = body["input_bucket"]
-    input_prefix = body["input_prefix"]
-    output_bucket = body["output_bucket"]
-    output_prefix = body["output_prefix"]
+        input_bucket = data["input_bucket"]
+        input_prefix = data["input_prefix"]
+        output_bucket = data["output_bucket"]
+        output_prefix = data["output_prefix"]
 
-    src_bucket = client.bucket(input_bucket)
-    dst_bucket = client.bucket(output_bucket)
+        in_bucket = storage_client.bucket(input_bucket)
+        out_bucket = storage_client.bucket(output_bucket)
 
-    blobs = src_bucket.list_blobs(prefix=input_prefix)
+        blobs = list(storage_client.list_blobs(input_bucket, prefix=input_prefix))
 
-    processed = 0
+        processed = 0
 
-    for blob in blobs:
-        if not blob.name.endswith(".json"):
-            continue
+        for blob in blobs:
+            if not blob.name.endswith(".json"):
+                continue
 
-        data = blob.download_as_text().splitlines()
-        cleaned = []
+            try:
+                raw = blob.download_as_text(encoding="utf-8").strip()
+                if not raw:
+                    continue
 
-        for line in data:
-            record = json.loads(line)
-            cleaned.append(json.dumps(clean_record(record), ensure_ascii=False))
+                # ---- HANDLE JSON ARRAY vs JSONL ----
+                if raw.startswith("["):
+                    records = json.loads(raw)
+                else:
+                    records = [
+                        json.loads(line)
+                        for line in raw.splitlines()
+                        if line.strip()
+                    ]
 
-        filename = os.path.basename(blob.name).replace(".json", "_cleaned.json")
-        dst_blob = dst_bucket.blob(f"{output_prefix}/{filename}")
-        dst_blob.upload_from_string("\n".join(cleaned), content_type="application/json")
+                cleaned_records = [clean_record(r) for r in records]
 
-        processed += 1
+                # output filename
+                filename = os.path.basename(blob.name)
+                name, ext = os.path.splitext(filename)
+                new_name = f"{name}_cleaned{ext}"
 
-    return jsonify({"status": "success", "files_processed": processed})
+                out_path = output_prefix.rstrip("/") + "/" + new_name
 
+                out_blob = out_bucket.blob(out_path)
+                out_blob.upload_from_string(
+                    json.dumps(cleaned_records, ensure_ascii=False, indent=2),
+                    content_type="application/json",
+                )
+
+                processed += 1
+
+            except Exception as e:
+                print(f"Skip file {blob.name}: {e}")
+                continue
+
+        return jsonify({
+            "status": "success",
+            "files_processed": processed
+        })
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return {"error": str(e)}, 500
+
+
+# -----------------------
+# RUN FOR CLOUD RUN
+# -----------------------
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
